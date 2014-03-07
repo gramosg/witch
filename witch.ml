@@ -1,10 +1,15 @@
 open Sys
 open Unix
 
-let try_finalize f x finally y =
-  let res = try f x with exn -> finally y; raise exn in
-  finally y;
+let try_finally body cleanup =
+  let res = try body ()
+            with exn -> cleanup (); raise exn in
+  cleanup ();
   res
+
+let exn_to_opt body =
+  try Some (body ())
+  with exn -> None
 
 let exec cmd = execvp cmd.(0) cmd
 
@@ -54,7 +59,7 @@ module Net = struct
       | 0 -> if fork () <> 0 then exit 0;
              close server; service client; exit 0
       | n -> ignore (waitpid [] n) in
-    try_finalize treat () close cfd
+    try_finally treat (fun () ->  close cfd)
 
   let s_handler c_handler sock (_, caddr as client) =
     print_endline
@@ -89,6 +94,13 @@ end
 
 module Comm = struct
   module Window = Xdotool
+  module Ms = Map.Make(String)
+
+  let cmds = [("start","m");
+              ("up","w"); ("down","s"); ("left","a"); ("right","d");
+              ("a","k"); ("b","j");
+              ("l","h"); ("r","l")]
+  let cmds = List.fold_left (fun m (k,v) -> Ms.add k v m) Ms.empty cmds
 
   let get_wid name =
     let wids = Window.search_by_title name in
@@ -104,9 +116,13 @@ module Comm = struct
     while true do
       print_string "> ";
       flush_all ();
-      let l = read_line () in
-      Window.send wid l;
+      let cmd = read_line () in
+      match exn_to_opt (fun () -> Ms.find cmd cmds) with
+      | None -> print_endline ("Unknown cmd '" ^ cmd ^ "'")
+      | Some key -> print_endline ("Sending cmd '" ^ cmd ^ "' (" ^ key ^ ")...");
+                    Window.send wid key
     done
+
     (* Window.send wid "awdwawdwawdwawdwa" *)
     (* Window.send wid "aaaaaaaaaaaaaaaaa" *)
 end
@@ -115,7 +131,7 @@ let () =
   if Array.length Sys.argv <> 2 then print_usage ();
 
   let addr = inet_addr_any in
-  let port = 8081 in
+  let port = 8080 in
   let inaddr = ADDR_INET (addr, port) in
   let name = Sys.argv.(1) in
 
