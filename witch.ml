@@ -1,6 +1,13 @@
 open Sys
 open Unix
 
+module Ms = Map.Make(String)
+module Mc = Map.Make(Char)
+
+type 'a or_error = Ok of 'a | Error of string
+
+let identity x = x
+
 let try_finally body cleanup =
   let res = try body ()
             with exn -> cleanup (); raise exn in
@@ -18,11 +25,16 @@ let launch cmd =
   then exec cmd
 
 let print_usage () =
-  List.iter print_endline ["Usage: " ^ Sys.argv.(0) ^ " <title>"];
+  List.iter print_endline ["Usage: " ^ Sys.argv.(0) ^ " <title> <console>\n"
+                           ^ "  Consoles: [gb gba]"];
   exit 0
 
-let die reason =
-  print_endline ("ERROR! " ^ reason); exit (-1)
+let die msg =
+  print_endline ("ERROR! (" ^ msg ^ ")"); exit (-1)
+
+let get_or_die = function
+  | Ok x -> x
+  | Error msg -> die msg
 
 let launch_get_output cmd  =
   let input_lines ic =
@@ -69,18 +81,23 @@ module Net = struct
     double_fork sock c_handler client
 end
 
-module type XWIN = sig
+module type WM = sig
     type wid
-    val cmdname : string
+
+    val pp_wid : wid -> string
 
     val search_by_title : string -> wid list
     val title : wid -> string
     val focus : wid -> unit
     val send : wid -> string -> unit
 end
-module Xdotool : (XWIN with type wid := string) = struct
+module Xdotool : WM = struct
+  type wid = string
+
   let cmdname = "xdotool"
   let delay = "200"
+
+  let pp_wid = identity
 
   let search_by_title name =
     launch_get_output [|cmdname; "search"; "--name"; name|]
@@ -92,51 +109,114 @@ module Xdotool : (XWIN with type wid := string) = struct
     launch [|cmdname; "type"; "--delay"; delay; keys|]
 end
 
-module Comm = struct
-  module Window = Xdotool
-  module Ms = Map.Make(String)
+module Console : sig
+  type t = Gb | Gba
+  type key
 
-  let cmds = [("start","m");
-              ("up","w"); ("down","s"); ("left","a"); ("right","d");
-              ("a","k"); ("b","j");
-              ("l","h"); ("r","l")]
-  let cmds = List.fold_left (fun m (k,v) -> Ms.add k v m) Ms.empty cmds
+  val of_string : string -> t or_error
+  val pp : t -> string
+  val keys : t -> key list
+end = struct
+  type t = Gb | Gba
+  type key =
+    | Kup | Kdown | Kleft | Kright
+    | Ka | Kb | Kl | Kr
+    | Kstart | Kselect
 
-  let get_wid name =
-    let wids = Window.search_by_title name in
-    let falses = [Sys.argv.(0); "mednafen"] in (* May have the same title *)
-    let falsewids = List.concat (List.map Window.search_by_title falses) in
-    match List.filter (fun wid -> not (List.mem wid falsewids)) wids with
-    | [x] -> Some (x, Window.title x)
-    | _   -> None
-
-  let c_handler wid (cfd, _) =
-    dup2 cfd stdin; dup2 cfd stdout; dup2 cfd stderr; close cfd;
-    Window.focus wid;
-    while true do
-      print_string "> ";
-      flush_all ();
-      let cmd = read_line () in
-      match exn_to_opt (fun () -> Ms.find cmd cmds) with
-      | None -> print_endline ("Unknown cmd '" ^ cmd ^ "'")
-      | Some key -> print_endline ("Sending cmd '" ^ cmd ^ "' (" ^ key ^ ")...");
-                    Window.send wid key
-    done
-
-    (* Window.send wid "awdwawdwawdwawdwa" *)
-    (* Window.send wid "aaaaaaaaaaaaaaaaa" *)
+  let of_string c = match c with
+    | "gb"  -> Ok Gb
+    | "gba" -> Ok Gba
+    | _     -> Error ("console " ^ c ^ " not supported")
+  let pp = function
+    | Gb  -> "gb (Game Boy)"
+    | Gba -> "gba (Game Boy Advanced)"
+  let keys = function
+    | Gb  -> [Kup;Kdown;Kleft;Kright;Ka;Kb;Kstart]
+    | Gba -> [Kup;Kdown;Kleft;Kright;Ka;Kb;Kl;Kr;Kstart]
 end
 
+module Comm (Wm : WM) = struct
+  type mode = Cmd | Key
+  let pp_mode = function
+    | Cmd -> "cmd"
+    | Key -> "key"
+
+  type state = {
+    wid  : Wm.wid;
+    mode : mode;
+    (* bds : char Bindings.t; *)
+    console : Console.t
+  }
+  let mk_state wid mode (* bds *) console =
+    { wid     = wid;
+      mode    = mode;
+      (* bds     = bds; *)
+      console = console }
+  let switch_mode st =
+    let mode' = match st.mode with Cmd -> Key | Key -> Cmd in
+    print_endline ("Mode switched to " ^ pp_mode mode');
+    { st with mode = mode' }
+
+  let cmdmap =
+    let press k st = Wm.send st.wid k; st in
+    let default_cmds =
+      [("up","w"); ("down","s"); ("left","a"); ("right","d");
+       ("a","u"); ("b","h"); ("l","i"); ("r","o"); ("start","j")] in
+    let keys = List.fold_left (fun m (k,v) -> Ms.add k (press v) m)
+                              Ms.empty default_cmds in
+    let cmdbds = [("switch", switch_mode)] in
+    let cmds = List.fold_left (fun m (k,f) -> Ms.add k f m)
+                              Ms.empty cmdbds in
+    Ms.fold Ms.add keys cmds
+
+  let find_window name =
+    let wids = Wm.search_by_title name in
+    let falses = [Sys.argv.(0); "mednafen"] in (* May have the same title *)
+    let falsewids = List.concat (List.map Wm.search_by_title falses) in
+    match List.filter (fun wid -> not (List.mem wid falsewids)) wids with
+    | []  -> Error "window not found"
+    | [x] -> Ok (x, Wm.title x)
+    | _   -> Error "multiple windows found ()" (* TODO print titles found *)
+
+  let c_handler st0 (cfd, _) =
+    dup2 cfd stdin; dup2 cfd stdout; dup2 cfd stderr; close cfd;
+    Wm.focus st0.wid;
+    let rec loop st =
+      match st.mode with
+      | Cmd ->
+         print_string "> ";
+         flush_all ();
+         let cmd = read_line () in
+         sleep 1;
+         let f = match exn_to_opt (fun () -> Ms.find cmd cmdmap) with
+           | None -> print_endline ("Unknown cmd '" ^ cmd ^ "'"); identity
+           | Some f -> f in
+         loop (f st)
+      | Key ->
+         print_string "> "; in
+    loop st0
+
+    (* Wm.send wid "awdwawdwawdwawdwa" *)
+end
+
+module MyWm = Xdotool
+module MyComm = Comm(MyWm)
+
 let () =
-  if Array.length Sys.argv <> 2 then print_usage ();
+  if Array.length Sys.argv <> 3 then print_usage ();
 
   let addr = inet_addr_any in
   let port = 8080 in
   let inaddr = ADDR_INET (addr, port) in
-  let name = Sys.argv.(1) in
+  let title = Sys.argv.(1) in
 
-  match Comm.get_wid name with
-  | None              -> die ("Window '" ^ name ^ "' not found")
-  | Some (wid, title) ->
-     print_endline ("Found window '" ^ title ^ "' (WID " ^ wid ^ ")");
-     Net.tcp_server (Net.s_handler (Comm.c_handler wid)) inaddr
+  let console = get_or_die (Console.of_string Sys.argv.(2)) in
+  print_endline ("Using " ^ Console.pp console ^ " settings");
+
+  print_string ("Searching window with title '" ^ title ^ "'... ");
+  let (wid, title) = get_or_die (MyComm.find_window title) in
+  print_endline ("found '" ^ title ^ "' (WID " ^ MyWm.pp_wid wid ^ ")");
+
+  let st0 = MyComm.mk_state wid MyComm.Cmd console in
+  print_endline ("Starting server in port " ^ string_of_int port ^ "...");
+  Net.tcp_server (Net.s_handler (MyComm.c_handler st0)) inaddr
