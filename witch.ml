@@ -158,7 +158,7 @@ module Comm (Wm : WM) = struct
     { st with mode = mode' }
 
   let cmdmap =
-    let press k st = Wm.send st.wid k; st in
+    let press k st = Wm.focus st.wid; Wm.send k; st in
     let default_cmds =
       [("up","w"); ("down","s"); ("left","a"); ("right","d");
        ("a","u"); ("b","h"); ("l","i"); ("r","o"); ("start","j")] in
@@ -180,7 +180,6 @@ module Comm (Wm : WM) = struct
 
   let c_handler st0 (cfd, _) =
     dup2 cfd stdin; dup2 cfd stdout; dup2 cfd stderr; close cfd;
-    Wm.focus st0.wid;
     let rec loop st =
       match st.mode with
       | Cmd ->
