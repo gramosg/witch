@@ -89,13 +89,13 @@ module type WM = sig
     val search_by_title : string -> wid list
     val title : wid -> string
     val focus : wid -> unit
-    val send : wid -> string -> unit
+    val send : string -> unit
 end
 module Xdotool : WM = struct
   type wid = string
 
   let cmdname = "xdotool"
-  let delay = "200"
+  let delay = "50"
 
   let pp_wid = identity
 
@@ -105,7 +105,7 @@ module Xdotool : WM = struct
     List.hd (launch_get_output [|cmdname; "getwindowname"; wid|])
   let focus wid =
     launch [|cmdname; "windowfocus"; wid|]
-  let send wid keys =
+  let send keys =
     launch [|cmdname; "type"; "--delay"; delay; keys|]
 end
 
@@ -187,7 +187,6 @@ module Comm (Wm : WM) = struct
          print_string "> ";
          flush_all ();
          let cmd = read_line () in
-         sleep 1;
          let f = match exn_to_opt (fun () -> Ms.find cmd cmdmap) with
            | None -> print_endline ("Unknown cmd '" ^ cmd ^ "'"); identity
            | Some f -> f in
@@ -195,8 +194,6 @@ module Comm (Wm : WM) = struct
       | Key ->
          print_string "> "; in
     loop st0
-
-    (* Wm.send wid "awdwawdwawdwawdwa" *)
 end
 
 module MyWm = Xdotool
